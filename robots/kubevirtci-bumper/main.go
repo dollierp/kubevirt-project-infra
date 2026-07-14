@@ -1,36 +1,39 @@
 /*
-Copyright 2020 The KubeVirt Authors.
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-    http://www.apache.org/licenses/LICENSE-2.0
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-*/
+ * This file is part of the KubeVirt project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ * Copyright The KubeVirt Authors.
+ *
+ */
 
 package main
 
 import (
-	"context"
 	"flag"
 	"fmt"
 	"os"
 	"strconv"
 
+	"github.com/sirupsen/logrus"
+	"sigs.k8s.io/prow/pkg/flagutil"
+
 	"kubevirt.io/project-infra/pkg/kubevirtci"
 	"kubevirt.io/project-infra/pkg/querier"
-
-	"github.com/google/go-github/github"
-	"github.com/sirupsen/logrus"
-	"golang.org/x/oauth2"
 )
 
 type options struct {
-	TokenPath              string
-	endpoint               string
+	github                 flagutil.GitHubOptions
 	ensureLatest           bool
 	forceTargetMajorMinor  string
 	preReleaseVersion      string
@@ -42,6 +45,9 @@ type options struct {
 }
 
 func (o *options) Validate() error {
+	if err := o.github.Validate(false); err != nil {
+		return err
+	}
 	tasks := 0
 	if o.ensureLatest {
 		tasks++
@@ -73,8 +79,7 @@ func (o *options) Validate() error {
 func gatherOptions() options {
 	o := options{}
 	fs := flag.NewFlagSet(os.Args[0], flag.ExitOnError)
-	fs.StringVar(&o.TokenPath, "github-token-path", "/etc/github/token", "Path to the file containing the GitHub OAuth secret.")
-	fs.StringVar(&o.endpoint, "github-endpoint", "https://api.github.com/", "GitHub's API endpoint (may differ for enterprise).")
+        o.github.AddFlags(fs)
 	fs.BoolVar(&o.ensureLatest, "ensure-latest", false, "Ensure that we have a provider for the latest k8s release")
 	fs.StringVar(&o.forceTargetMajorMinor, "force-target-major-minor", "", `when using ensure-latest, override latest k8s release to use given target major.minor (i.e. "1.28"`)
 	fs.StringVar(&o.preReleaseVersion, "pre-release-version", "", `when using ensure-latest, add k8s pre release suffix (i.e. add alpha0 as in "1.28.0-alpha0"`)
@@ -97,30 +102,12 @@ func main() {
 
 	o := gatherOptions()
 	if err := o.Validate(); err != nil {
-		log.WithError(err).Error("Invalid arguments provided.")
-		os.Exit(1)
+		log.WithError(err).Fatal("Invalid arguments provided.")
 	}
 
-	ctx := context.Background()
-	var client *github.Client
-	if o.TokenPath == "" {
-		var err error
-		client, err = github.NewEnterpriseClient(o.endpoint, o.endpoint, nil)
-		if err != nil {
-			log.Panicln(err)
-		}
-	} else {
-		token, err := os.ReadFile(o.TokenPath)
-		if err != nil {
-			log.Panicln(err)
-		}
-		ts := oauth2.StaticTokenSource(
-			&oauth2.Token{AccessToken: string(token)},
-		)
-		client, err = github.NewEnterpriseClient(o.endpoint, o.endpoint, oauth2.NewClient(ctx, ts))
-		if err != nil {
-			log.Panicln(err)
-		}
+	client, err := o.github.GitHubClient(false)
+	if err != nil {
+		log.WithError(err).Fatal("Failed to create a GitHub client.")
 	}
 
 	releases, _, err := client.Repositories.ListReleases(ctx, "kubernetes", "kubernetes", nil)

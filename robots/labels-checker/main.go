@@ -13,28 +13,24 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2021 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
+
 package main
 
 import (
-	"context"
 	"flag"
 	"fmt"
 	"os"
 	"strings"
 
-	"sigs.k8s.io/prow/pkg/config/secret"
-
-	"github.com/google/go-github/github"
 	"github.com/sirupsen/logrus"
-	"golang.org/x/oauth2"
+	"sigs.k8s.io/prow/pkg/flagutil"
 )
 
 type options struct {
-	tokenPath           string
-	endpoint            string
+	github              flagutil.GitHubOptions
 	org                 string
 	repo                string
 	author              string
@@ -43,6 +39,9 @@ type options struct {
 }
 
 func (o *options) validate() error {
+	if err := o.github.Validate(o.dryRun); err != nil {
+		return err
+	}
 	if o.org == "" {
 		return fmt.Errorf("org is required")
 	}
@@ -65,13 +64,13 @@ func (o *options) getEnsureLabelsMissing() []string {
 var o = options{}
 
 func init() {
-	flag.StringVar(&o.tokenPath, "github-token-path", "/etc/github/token", "Path to the file containing the GitHub OAuth secret.")
-	flag.StringVar(&o.endpoint, "github-endpoint", "https://api.github.com/", "GitHub's API endpoint (may differ for enterprise).")
-	flag.StringVar(&o.org, "org", "", "The org for the PR.")
-	flag.StringVar(&o.repo, "repo", "", "The repo for the PR.")
-	flag.StringVar(&o.author, "author", "", "The author for the PR.")
-	flag.StringVar(&o.branchName, "branch-name", "", "The branch name for the PR.")
-	flag.StringVar(&o.ensureLabelsMissing, "ensure-labels-missing", "lgtm", "What labels have to be missing on the PR (list of comma separated labels).")
+	fs := flag.NewFlagSet(os.Args[0], flag.ExitOnError)
+	o.github.AddFlags(fs)
+	fs.StringVar(&o.org, "org", "", "The org for the PR.")
+	fs.StringVar(&o.repo, "repo", "", "The repo for the PR.")
+	fs.StringVar(&o.author, "author", "", "The author for the PR.")
+	fs.StringVar(&o.branchName, "branch-name", "", "The branch name for the PR.")
+	fs.StringVar(&o.ensureLabelsMissing, "ensure-labels-missing", "lgtm", "What labels have to be missing on the PR (list of comma separated labels).")
 }
 
 func main() {
@@ -79,31 +78,16 @@ func main() {
 	// TODO: Use global option from the prow config.
 	logrus.SetLevel(logrus.DebugLevel)
 
-	flag.Parse()
+	if err := fs.Parse(os.Args[1:]); err != nil {
+		log().WithError(err).Fatal("Failed to parse arguments.")
+	}
 	if err := o.validate(); err != nil {
 		log().WithError(err).Fatal("Invalid arguments provided.")
 	}
 
-	ctx := context.Background()
-	var client *github.Client
-	if o.tokenPath == "" {
-		var err error
-		client, err = github.NewEnterpriseClient(o.endpoint, o.endpoint, nil)
-		if err != nil {
-			log().Panicln(err)
-		}
-	} else {
-		err := secret.Add(o.tokenPath)
-		if err != nil {
-			log().Fatalf("Failed to load token from path %s: %v", o.tokenPath, err)
-		}
-		ts := oauth2.StaticTokenSource(
-			&oauth2.Token{AccessToken: string(secret.GetSecret(o.tokenPath))},
-		)
-		client, err = github.NewEnterpriseClient(o.endpoint, o.endpoint, oauth2.NewClient(ctx, ts))
-		if err != nil {
-			log().Panicln(err)
-		}
+	client, err := o.github.GitHubClient(false)
+	if err != nil {
+		log.WithError(err).Fatal("Failed to create a GitHub client.")
 	}
 
 	prs, _, err := client.PullRequests.List(ctx, o.org, o.repo, &github.PullRequestListOptions{

@@ -1,38 +1,41 @@
 /*
-Copyright 2010 The KubeVirt Authors.
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-    http://www.apache.org/licenses/LICENSE-2.0
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-*/
+ * This file is part of the KubeVirt project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ * Copyright The KubeVirt Authors.
+ *
+ */
 
 package main
 
 import (
-	"context"
 	"flag"
 	"fmt"
 	"os"
 	"strconv"
 	"text/template"
 
-	"kubevirt.io/project-infra/pkg/querier"
-
-	"github.com/google/go-github/github"
 	"github.com/sirupsen/logrus"
-	"golang.org/x/oauth2"
+	"sigs.k8s.io/prow/pkg/flagutil"
+
+	"kubevirt.io/project-infra/pkg/querier"
 )
 
 type options struct {
+	github           flagutil.GitHubOptions
 	org              string
 	repo             string
-	TokenPath        string
-	endpoint         string
 	latest           bool
 	latestPatchOf    string
 	latestThreeMinor string
@@ -42,6 +45,9 @@ type options struct {
 }
 
 func (o *options) Validate() error {
+	if err := o.github.Validate(false); err != nil {
+		return err
+	}
 	queries := 0
 	if o.latest {
 		queries++
@@ -75,10 +81,9 @@ func (o *options) Validate() error {
 func gatherOptions() options {
 	o := options{}
 	fs := flag.NewFlagSet(os.Args[0], flag.ExitOnError)
+	o.github.AddFlags(fs)
 	fs.StringVar(&o.org, "org", "kubevirt", "Organization")
 	fs.StringVar(&o.repo, "repo", "kubevirt", "Organization")
-	fs.StringVar(&o.TokenPath, "github-token-path", "/etc/github/token", "Path to the file containing the GitHub OAuth secret.")
-	fs.StringVar(&o.endpoint, "github-endpoint", "https://api.github.com/", "GitHub's API endpoint (may differ for enterprise).")
 	fs.BoolVar(&o.latest, "latest", false, "Query for the latest release")
 	fs.StringVar(&o.latestThreeMinor, "last-three-minor-of", "", "Query for the last three minor releases of a given release (e.g. v1 or 2)")
 	fs.StringVar(&o.latestPatchOf, "last-patch-of", "", "Latest patch release of the given release (e.g. v1.14 or 0.12)")
@@ -96,30 +101,12 @@ func main() {
 
 	o := gatherOptions()
 	if err := o.Validate(); err != nil {
-		log.WithError(err).Error("Invalid arguments provided.")
-		os.Exit(1)
+		log.WithError(err).Fatal("Invalid arguments provided.")
 	}
 
-	ctx := context.Background()
-	var client *github.Client
-	if o.TokenPath == "" {
-		var err error
-		client, err = github.NewEnterpriseClient(o.endpoint, o.endpoint, nil)
-		if err != nil {
-			log.Panicln(err)
-		}
-	} else {
-		token, err := os.ReadFile(o.TokenPath)
-		if err != nil {
-			log.Panicln(err)
-		}
-		ts := oauth2.StaticTokenSource(
-			&oauth2.Token{AccessToken: string(token)},
-		)
-		client, err = github.NewEnterpriseClient(o.endpoint, o.endpoint, oauth2.NewClient(ctx, ts))
-		if err != nil {
-			log.Panicln(err)
-		}
+	client, err := o.github.GitHubClient(false)
+	if err != nil {
+		log.WithError(err).Fatal("Failed to create a GitHub client.")
 	}
 
 	releases, _, err := client.Repositories.ListReleases(ctx, o.org, o.repo, nil)

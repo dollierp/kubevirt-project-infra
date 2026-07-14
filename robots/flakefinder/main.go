@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2019 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 
@@ -24,46 +24,49 @@ import (
 	"flag"
 	"fmt"
 	"log"
-	"net/url"
+	"os"
 	"path/filepath"
 	"time"
 
+	"cloud.google.com/go/storage"
+	"sigs.k8s.io/prow/pkg/flagutil"
+
 	"kubevirt.io/project-infra/pkg/flakefinder"
 	ghapi "kubevirt.io/project-infra/pkg/flakefinder/github"
-
-	"sigs.k8s.io/prow/pkg/config/secret"
-
-	"cloud.google.com/go/storage"
-	"github.com/google/go-github/v28/github"
-	"golang.org/x/oauth2"
-	"sigs.k8s.io/prow/pkg/flagutil"
 )
 
 func flagOptions() options {
 	o := options{
 		endpoint: flagutil.NewStrings("https://api.github.com"),
 	}
-	flag.BoolVar(&o.isDryRun, "dry-run", true, "Whether report should be only printed to standard out instead of written to gcs") // TODO: incompatible change, requires setting flags on jobs
-	flag.DurationVar(&o.merged, "merged", 24*7*time.Hour, "Filter to issues merged in the time window")
-	flag.Var(&o.endpoint, "endpoint", "GitHub's API endpoint")
-	flag.StringVar(&o.tokenPath, "token", "", "Path to github token")
-	flag.BoolVar(&o.isPreview, "preview", false, "Whether report should be written to preview directory")
-	flag.StringVar(&o.prBaseBranch, "pr_base_branch", PRBaseBranchDefault, "Base branch for the PRs")
-	flag.StringVar(&o.reportOutputChildPath, "report_output_child_path", "", fmt.Sprintf("Child path below the main reporting directory '%s' (i.e. 'master')", flakefinder.ReportsPath))
-	flag.StringVar(&o.org, "org", Org, "GitHub org name")
-	flag.StringVar(&o.repo, "repo", Repo, "GitHub org name")
-	flag.BoolVar(&o.today, "today", false, "Whether to create a report for the current day only (i.e. using data starting from report day 00:00Z till now)")
-	flag.BoolVar(&o.skipBeforeStartOfReport, "skip_results_before_start_of_report", true, "Whether to skip test results occurring before start of report")
-	flag.StringVar(&o.periodicJobDirRegex, "periodic_job_dir_regex", "", "Regular expression to use for fetching data from periodic jobs, or empty string if not wanted")
-	flag.StringVar(&o.batchJobDirRegex, "batch_job_dir_regex", "pull-kubevirt-e2e-.*", "Regular expression to use for filtering the fetching of batch job data")
-	flag.Parse()
+	fs := flag.NewFlagSet(os.Args[0], flag.ExitOnError)
+	fs.BoolVar(&o.dryRun, "dry-run", true, "Whether report should be only printed to standard out instead of written to gcs") // TODO: incompatible change, requires setting flags on jobs
+	fs.DurationVar(&o.merged, "merged", 24*7*time.Hour, "Filter to issues merged in the time window")
+	o.github.AddFlags(fs)
+	// TODO: remove after backwards compatibility is not required anymore
+	fs.StringVar(&o.tokenPath, "token", "", "Path to github token")
+	fs.Var(&o.endpoint, "endpoint", "GitHub's API endpoint")
+	fs.BoolVar(&o.isPreview, "preview", false, "Whether report should be written to preview directory")
+	fs.StringVar(&o.prBaseBranch, "pr_base_branch", PRBaseBranchDefault, "Base branch for the PRs")
+	fs.StringVar(&o.reportOutputChildPath, "report_output_child_path", "", fmt.Sprintf("Child path below the main reporting directory '%s' (i.e. 'master')", flakefinder.ReportsPath))
+	fs.StringVar(&o.org, "org", Org, "GitHub org name")
+	fs.StringVar(&o.repo, "repo", Repo, "GitHub org name")
+	fs.BoolVar(&o.today, "today", false, "Whether to create a report for the current day only (i.e. using data starting from report day 00:00Z till now)")
+	fs.BoolVar(&o.skipBeforeStartOfReport, "skip_results_before_start_of_report", true, "Whether to skip test results occurring before start of report")
+	fs.StringVar(&o.periodicJobDirRegex, "periodic_job_dir_regex", "", "Regular expression to use for fetching data from periodic jobs, or empty string if not wanted")
+	fs.StringVar(&o.batchJobDirRegex, "batch_job_dir_regex", "pull-kubevirt-e2e-.*", "Regular expression to use for filtering the fetching of batch job data")
+	if err := fs.Parse(os.Args[1:]); err != nil {
+		log.Fatalf("failed to parse flags: %v", err)
+	}
 	return o
 }
 
 type options struct {
-	isDryRun                bool
-	endpoint                flagutil.Strings
+	dryRun bool
+	github flagutil.GitHubOptions
+	// TODO: remove after backwards compatibility is not required anymore
 	tokenPath               string
+	endpoint                flagutil.Strings
 	merged                  time.Duration
 	isPreview               bool
 	prBaseBranch            string
@@ -87,31 +90,23 @@ func main() {
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 	o := flagOptions()
 
-	if o.tokenPath == "" {
-		log.Fatal("empty --token")
+	// TODO: remove after backwards compatibility is not required anymore
+	if o.tokenPath != "" {
+		o.github.TokenPath = o.tokenPath
 	}
-	err := secret.Add(o.tokenPath)
-	if err != nil {
-		log.Fatalf("Failed to load token from path %s: %v", o.tokenPath, err)
+
+	if err := o.github.Validate(o.dryRun); err != nil {
+		log.Fatalf("Failed to validate GitHub options: %v.", err)
 	}
 
 	ReportOutputPath = BuildReportOutputPath(o)
 
-	for _, ep := range o.endpoint.Strings() {
-		_, err = url.ParseRequestURI(ep)
-		if err != nil {
-			log.Fatalf("Invalid --endpoint URL %q: %v.", ep, err)
-		}
+	ghClient, err := o.github.GitHubClient(o.dryRun)
+	if err != nil {
+		log.Fatalf("Failed to create a GitHub client: %v.", err)
 	}
 
 	ctx := context.Background()
-	ts := oauth2.StaticTokenSource(
-		&oauth2.Token{AccessToken: string(secret.GetSecret(o.tokenPath))},
-	)
-	tc := oauth2.NewClient(ctx, ts)
-
-	ghClient := github.NewClient(tc)
-
 	storageClient, err := storage.NewClient(ctx)
 	if err != nil {
 		log.Fatalf("Failed to create new storage client: %v.\n", err)
@@ -123,13 +118,13 @@ func main() {
 
 	reportBaseData := flakefinder.GetReportBaseData(ctx, ghapi.NewQuery(ghClient, o.org, o.repo, o.prBaseBranch), storageClient, reportBaseDataOptions)
 
-	err = WriteReportToBucket(ctx, storageClient, o.merged, o.org, o.repo, o.isDryRun, reportBaseData)
+	err = WriteReportToBucket(ctx, storageClient, o.merged, o.org, o.repo, o.dryRun, reportBaseData)
 	if err != nil {
 		log.Fatal(fmt.Errorf("failed to write report: %v", err))
 		return
 	}
 
-	printIndexPageToStdOut := o.isDryRun
+	printIndexPageToStdOut := o.dryRun
 	err = CreateReportIndex(ctx, storageClient, o.org, o.repo, printIndexPageToStdOut)
 	if err != nil {
 		log.Fatal(fmt.Errorf("failed to create report index page: %v", err))

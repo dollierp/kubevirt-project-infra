@@ -13,23 +13,20 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright the KubeVirt Authors.
+ * Copyright The KubeVirt Authors.
  *
  */
 
 package main
 
 import (
-	"context"
 	"flag"
 	"fmt"
 	"net/http"
 	"os"
-	"strings"
 
-	"github.com/google/go-github/github"
 	"github.com/sirupsen/logrus"
-	"golang.org/x/oauth2"
+	"sigs.k8s.io/prow/pkg/flagutil"
 	"sigs.k8s.io/yaml"
 )
 
@@ -38,8 +35,7 @@ const robotName = "org-access-checker"
 type options struct {
 	debugLogging bool
 
-	tokenPath string
-	endpoint  string
+	github flagutil.GitHubOptions
 
 	org string
 }
@@ -60,16 +56,14 @@ type AccessPermissionsToRepositoriesToCollaborators map[string]RepositoriesToCol
 
 func (o *options) Validate() error {
 	fs := flag.NewFlagSet(os.Args[0], flag.ExitOnError)
-	fs.StringVar(&o.tokenPath, "github-token-path", "/etc/github/token", "Path to the file containing the GitHub OAuth secret.")
-	fs.StringVar(&o.endpoint, "github-endpoint", "https://api.github.com/", "GitHub's API endpoint (may differ for enterprise).")
+	o.github.AddFlags(fs)
 	fs.StringVar(&o.org, "org", "kubevirt", "The GitHub org")
 	fs.BoolVar(&o.debugLogging, "v", false, "verbose aka debug logging")
-	err := fs.Parse(os.Args[1:])
-	if err != nil {
+	if err := fs.Parse(os.Args[1:]); err != nil {
 		return err
 	}
-	if o.tokenPath == "" {
-		return fmt.Errorf("github-token-path is required")
+	if err := o.github.Validate(false); err != nil {
+		return err
 	}
 	if o.org == "" {
 		return fmt.Errorf("org is required")
@@ -95,16 +89,7 @@ func main() {
 		logrus.SetLevel(logrus.DebugLevel)
 	}
 
-	rawToken, err := os.ReadFile(o.tokenPath)
-	if err != nil {
-		log().WithError(err).Fatalf("failed to read token %q", o.tokenPath)
-	}
-	token := strings.TrimSpace(string(rawToken))
-	ctx := context.Background()
-	ts := oauth2.StaticTokenSource(
-		&oauth2.Token{AccessToken: token},
-	)
-	githubClient, err := github.NewEnterpriseClient(o.endpoint, o.endpoint, oauth2.NewClient(ctx, ts))
+	githubClient, err := o.github.GitHubClient(false)
 	if err != nil {
 		log().WithError(err).Fatal("failed to create github client")
 	}

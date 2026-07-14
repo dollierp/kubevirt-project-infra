@@ -13,23 +13,20 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright the KubeVirt Authors.
+ * Copyright The KubeVirt Authors.
  *
  */
 
 package main
 
 import (
-	"context"
 	"flag"
 	"fmt"
 	"os"
 	"sort"
-	"strings"
 
-	"github.com/shurcooL/githubv4"
 	"github.com/sirupsen/logrus"
-	"golang.org/x/oauth2"
+	"sigs.k8s.io/prow/pkg/flagutil"
 
 	"kubevirt.io/project-infra/external-plugins/referee/ghgraphql"
 )
@@ -44,27 +41,35 @@ func init() {
 	logrus.SetFormatter(&logrus.JSONFormatter{})
 }
 
+type options struct {
+	github flagutil.GitHubOptions
+	org    string
+	repo   string
+}
+
+func gatherOptions() options {
+	o := options{}
+	fs := flag.NewFlagSet(os.Args[0], flag.ExitOnError)
+	o.github.AddFlags(fs)
+	fs.StringVar(&o.org, "org", "kubevirt", "Organization")
+	fs.StringVar(&o.repo, "repo", "kubevirt", "Organization")
+	_ = fs.Parse(os.Args[1:])
+	return o
+}
+
 func main() {
-	var tokenPath, org, repo string
-	flag.StringVar(&tokenPath, "github-token-path", "", "the path to the GitHub token to use")
-	flag.StringVar(&org, "org", "kubevirt", "the path to the GitHub token to use")
-	flag.StringVar(&repo, "repo", "kubevirt", "the path to the GitHub token to use")
-	flag.Parse()
+	o := gatherOptions()
 
 	log := logrus.WithField("robot", "retests-to-merge").WithField("repo", fmt.Sprintf("%s/%s", org, repo))
 
-	token, err := os.ReadFile(tokenPath)
-	if err != nil {
-		log.Fatalf("failed to use github token path %s: %v", tokenPath, err)
+	if err := o.github.Validate(false); err != nil {
+		log.WithError(err).Fatal("Invalid arguments provided.")
 	}
-	src := oauth2.StaticTokenSource(
-		&oauth2.Token{AccessToken: strings.TrimSpace(string(token))},
-	)
-	httpClient := oauth2.NewClient(context.Background(), src)
 
-	gitHubClient := githubv4.NewClient(httpClient)
-
-	gitHubGraphQLClient := ghgraphql.NewClient(gitHubClient)
+	gitHubClient, err := o.github.GitHubClient(false)
+	if err != nil {
+		log.WithError(err).Fatal("Failed to create a GitHub client.")
+	}
 
 	pullRequests, err := gitHubGraphQLClient.FetchOpenApprovedAndLGTMedPRs(org, repo)
 	if err != nil {
