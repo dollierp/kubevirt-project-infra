@@ -14,10 +14,10 @@
 # limitations under the License.
 
 # Includes basic workspace setup, with gcloud and a bootstrap runner
-FROM fedora:44
+FROM registry.fedoraproject.org/fedora:44
 
 WORKDIR /workspace
-RUN mkdir -p /workspace
+RUN mkdir -m 1777 -p /workspace
 ENV WORKSPACE=/workspace \
     TERM=xterm
 
@@ -72,6 +72,19 @@ RUN dnf install -y \
     yq && \
   dnf clean all
 
+#
+# BEGIN: ROOTLESS USER SETUP
+#
+ARG ROOTLESS_USER='kubevirt'
+ARG ROOTLESS_UID='1000'
+ARG ROOTLESS_GID=${ROOTLESS_UID}
+
+RUN groupadd "${ROOTLESS_USER}" --gid="${ROOTLESS_GID}" && \
+    useradd "${ROOTLESS_USER}" --create-home --gid="${ROOTLESS_GID}" --uid="${ROOTLESS_UID}" && \
+    cd /home/"${ROOTLESS_USER}" && chgrp -R 0 . && chmod -R g=u .
+#
+# END: ROOTLESS USER SETUP
+#
 
 RUN if test "${ARCH}" != s390x; then \
         export PATH=/google-cloud-sdk/bin:/workspace:${PATH} && \
@@ -121,26 +134,26 @@ VOLUME /var/lib/containers
 COPY storage.conf /etc/containers/storage.conf
 RUN mkdir -p /var/lib/shared-images
 
-COPY containers.conf /etc/containers/containers.conf
+COPY --chmod=644 containers.conf /etc/containers/containers.conf
 COPY podman.json /etc/containers/networks/podman.json
 
-RUN chmod 644 /etc/containers/containers.conf
 #
 # END: PODMAN IN CONTAINER SETUP
 #
 
-
 # create mixin directories
-RUN mkdir -p /etc/setup.mixin.d/ && mkdir -p /etc/teardown.mixin.d/
+COPY --chown=root:root setup.mixin.d    /etc/setup.mixin.d/
+COPY --chown=root:root teardown.mixin.d /etc/teardown.mixin.d/
 
 # Trust git repositories used for e2e jobs
 RUN git config --global --add safe.directory '*'
 
 # note the runner is also responsible for making podman in container function if
 # env PODMAN_IN_CONTAINER_ENABLED is set and similarly responsible for generating
-
 # .bazelrc files if bazel remote caching is enabled
-COPY ["entrypoint.sh", "gcs_restapi.sh", "runner.sh", "create_bazel_cache_rcs.sh", \
-        "/usr/local/bin/"]
+COPY --chown=root:root entrypoint.sh \
+    runner.sh runner-rootless.sh runner-rootful.sh \
+    create_bazel_cache_rcs.sh gcs_restapi.sh \
+    /usr/local/bin/
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
